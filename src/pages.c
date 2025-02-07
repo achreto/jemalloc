@@ -22,6 +22,124 @@
 #define PAGES_FD_TAG -1
 #endif
 
+
+/* <extension> ************************************************************************************
+ **************************************************************************************************/
+#define USE_MY_MMAP 1
+
+#ifdef USE_MY_MMAP
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include "../../include/verified_mmap_ioctl.h"
+#include <pthread.h>
+
+static int my_mmap_fd = -1;
+static pthread_mutex_t my_mmap_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// TODO: need to find a way to tell linux not to use this range for mappings!
+#define MY_MMAP_ADDRESS_RANGE_START (6ULL * (512ULL << 30))
+#define MY_MMAP_ADDRESS_RANGE_END (7ULL * (512ULL << 30))
+
+static uint64_t my_mmap_sbrk = MY_MMAP_ADDRESS_RANGE_START;
+
+static int open_mmap_fd(void) {
+	my_mmap_fd = open("/proc/verified_mmap", O_RDWR);
+	if (my_mmap_fd < 0) {
+		perror("open");
+		return 1;
+	}
+	return 0;
+}
+
+static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t offset) {
+	if (my_mmap_sbrk + sz > MY_MMAP_ADDRESS_RANGE_END) {
+		malloc_write("<jemalloc>: Cannot allocate more memory\n");
+		return MAP_FAILED;
+	}
+
+	if (addr != NULL) {
+		malloc_write("<jemalloc>: Cannot map given address\n");
+		return MAP_FAILED;
+	}
+
+	if (sz != PAGE || sz != HUGEPAGE) {
+		malloc_write("<jemalloc>: Requested size not a single page!\n");
+		return MAP_FAILED;
+	}
+
+	pthread_mutex_lock(&my_mmap_mutex);
+	if (my_mmap_fd == -1 && open_mmap_fd() != 0) {
+		pthread_mutex_unlock(&my_mmap_mutex);
+		return MAP_FAILED;
+	}
+
+	// align, so we can do a proper huge page mapping, waists some memory
+	if (sz == HUGEPAGE) {
+		my_mmap_sbrk = ALIGNMENT_CEILING(my_mmap_sbrk, HUGEPAGE);
+	}
+
+	void *ret = (void *)my_mmap_sbrk;
+
+	union verified_mmap_ioctl_args args;
+	args.mmap_args = (struct mmap_args){
+		.vaddr = (uint64_t)ret,
+		.sz = sz,
+		.flags = flags
+	};
+
+	if (ioctl(my_mmap_fd, CMD_MMAP, &args) < 0) {
+		perror("ioctl");
+		ret = MAP_FAILED;
+	} else {
+		my_mmap_sbrk += sz;
+	}
+	pthread_mutex_unlock(&my_mmap_mutex);
+	return ret;
+}
+
+static int my_munmap(void *addr, size_t sz) {
+	union verified_mmap_ioctl_args args;
+	args.munmap_args = (struct munmap_args){
+		.vaddr = (uint64_t)addr,
+		.sz = sz
+	};
+
+	if (ioctl(my_mmap_fd, CMD_MUNMAP, &args) < 0) {
+		perror("ioctl");
+		return -1;
+	}
+	return 0;
+}
+
+static void my_mprotect(void *addr, size_t sz, int prot) {
+	union verified_mmap_ioctl_args args;
+	args.mprotect_args = (struct mprotect_args){
+		.vaddr = (uint64_t)addr,
+		.sz = sz,
+		.flags = prot
+	};
+
+	if (ioctl(my_mmap_fd, CMD_MPROTECT, &args) < 0) {
+		perror("ioctl");
+	}
+}
+
+#else
+static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t offset) {
+	return mmap(addr, sz, prot, flags, fd, offset);
+}
+static int my_munmap(void *addr, size_t sz) {
+	return munmap(addr, sz);
+}
+static void my_mprotect(void *addr, size_t sz, int prot) {
+	return mprotect(addr, sz, prot);
+}
+#endif
+
+/**************************************************************************************************
+ *********************************************************************************** </extension> */
+
+
 /******************************************************************************/
 /* Data. */
 
@@ -64,8 +182,7 @@ static int madvise_MADV_DONTNEED_zeroes_pages()
 	int works = -1;
 	size_t size = PAGE;
 
-	void * addr = mmap(NULL, size, PROT_READ|PROT_WRITE,
-	    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	void * addr = my_mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
 
 	if (addr == MAP_FAILED) {
 		malloc_write("<jemalloc>: Cannot allocate memory for "
@@ -86,7 +203,7 @@ static int madvise_MADV_DONTNEED_zeroes_pages()
 		works = 1;
 	}
 
-	if (munmap(addr, size) != 0) {
+	if (my_munmap(addr, size) != 0) {
 		malloc_write("<jemalloc>: Cannot deallocate memory for "
 		    "MADV_DONTNEED check\n");
 		if (opt_abort) {
@@ -146,7 +263,7 @@ os_pages_map(void *addr, size_t size, size_t alignment, bool *commit) {
 #endif
 		int prot = *commit ? PAGES_PROT_COMMIT : PAGES_PROT_DECOMMIT;
 
-		ret = mmap(addr, size, prot, mmap_flags, PAGES_FD_TAG, 0);
+		ret = my_mmap(addr, size, prot, mmap_flags, PAGES_FD_TAG, 0);
 	}
 	assert(ret != NULL);
 
@@ -202,7 +319,7 @@ os_pages_unmap(void *addr, size_t size) {
 #ifdef _WIN32
 	if (VirtualFree(addr, 0, MEM_RELEASE) == 0)
 #else
-	if (munmap(addr, size) == -1)
+	if (my_munmap(addr, size) == -1)
 #endif
 	{
 		char buf[BUFERROR_BUF];
@@ -271,7 +388,7 @@ pages_map(void *addr, size_t size, size_t alignment, bool *commit) {
 			flags |= MAP_ALIGNED(alignment_bits);
 		}
 
-		void *ret = mmap(addr, size, prot, flags, -1, 0);
+		void *ret = my_mmap(addr, size, prot, flags, -1, 0);
 		if (ret == MAP_FAILED) {
 			ret = NULL;
 		}
@@ -326,7 +443,7 @@ os_pages_commit(void *addr, size_t size, bool commit) {
 #else
 	{
 		int prot = commit ? PAGES_PROT_COMMIT : PAGES_PROT_DECOMMIT;
-		void *result = mmap(addr, size, prot, mmap_flags | MAP_FIXED,
+		void *result = my_mmap(addr, size, prot, mmap_flags | MAP_FIXED,
 		    PAGES_FD_TAG, 0);
 		if (result == MAP_FAILED) {
 			return true;
@@ -370,10 +487,10 @@ pages_mark_guards(void *head, void *tail) {
 	    (uintptr_t)head < (uintptr_t)tail);
 #ifdef JEMALLOC_HAVE_MPROTECT
 	if (head != NULL) {
-		mprotect(head, PAGE, PROT_NONE);
+		my_mprotect(head, PAGE, PROT_NONE);
 	}
 	if (tail != NULL) {
-		mprotect(tail, PAGE, PROT_NONE);
+		my_mprotect(tail, PAGE, PROT_NONE);
 	}
 #else
 	/* Decommit sets to PROT_NONE / MEM_DECOMMIT. */
@@ -404,13 +521,13 @@ pages_unmark_guards(void *head, void *tail) {
 	 */
 	bool ranged_mprotect = head_and_tail && range <= SC_LARGE_MINCLASS;
 	if (ranged_mprotect) {
-		mprotect(head, range, PROT_READ | PROT_WRITE);
+		my_mprotect(head, range, PROT_READ | PROT_WRITE);
 	} else {
 		if (head != NULL) {
-			mprotect(head, PAGE, PROT_READ | PROT_WRITE);
+			my_mprotect(head, PAGE, PROT_READ | PROT_WRITE);
 		}
 		if (tail != NULL) {
-			mprotect(tail, PAGE, PROT_READ | PROT_WRITE);
+			my_mprotect(tail, PAGE, PROT_READ | PROT_WRITE);
 		}
 	}
 #else
