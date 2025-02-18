@@ -72,7 +72,7 @@ static int open_mmap_fd(void) {
 
 static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t offset) {
 	// round up to the nearest page size multiple
-	malloc_printf("<jemalloc>: my_mmap %p %zu (%zu KB) %i %i %i %zi -> %lx\n", addr, sz, sz >> 10, prot, flags, fd, offset, my_mmap_sbrk);
+	// malloc_printf("<jemalloc>: my_mmap %p %zu (%zu KB) %i %i %i %zi -> %lx\n", addr, sz, sz >> 10, prot, flags, fd, offset, my_mmap_sbrk);
 
 	sz = ALIGNMENT_CEILING(sz, LARGE_PAGE_SIZE);
 
@@ -124,13 +124,13 @@ static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t o
 	}
 
 	pthread_mutex_unlock(&my_mmap_mutex);
-	malloc_printf("<jemalloc>: my_mmap  %p\n", ret);
+	// malloc_printf("<jemalloc>: my_mmap  %p\n", ret);
 	return ret;
 }
 
 static int my_munmap(void *addr, size_t sz) {
 
-	malloc_printf("<jemalloc>: my_munmap %p %zu\n", addr, sz);
+	// malloc_printf("<jemalloc>: my_munmap %p %zu\n", addr, sz);
 
 	sz = ALIGNMENT_CEILING(sz, LARGE_PAGE_SIZE);
 
@@ -158,7 +158,7 @@ static int my_munmap(void *addr, size_t sz) {
 }
 
 static void my_mprotect(void *addr, size_t sz, int prot) {
-	malloc_printf("<jemalloc>: my_mprotect %p %zu %i\n", addr, sz, prot);
+	// malloc_printf("<jemalloc>: my_mprotect %p %zu %i\n", addr, sz, prot);
 
 	union verified_mmap_ioctl_args args;
 	args.mprotect_args = (struct mprotect_args){
@@ -173,7 +173,7 @@ static void my_mprotect(void *addr, size_t sz, int prot) {
 }
 
 static int my_madvise(int *addr, size_t sz, int advice) {
-	malloc_printf("<jemalloc>: my_madvise %p %zu %i\n", addr, sz, advice);
+	// malloc_printf("<jemalloc>: my_madvise %p %zu %i\n", addr, sz, advice);
 	if (advice == MADV_DONTNEED) {
 		return -EINVAL;
 	}
@@ -181,20 +181,20 @@ static int my_madvise(int *addr, size_t sz, int advice) {
 }
 #else
 static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t offset) {
-	malloc_printf("<jemalloc>: my_mmap %p %zu %i %i %i %zi\n", addr, sz, prot, flags, fd, offset);
+	// malloc_printf("<jemalloc>: my_mmap %p %zu %i %i %i %zi\n", addr, sz, prot, flags, fd, offset);
 	return mmap(addr, sz, prot, flags, fd, offset);
 }
 static int my_munmap(void *addr, size_t sz) {
-	malloc_printf("<jemalloc>: my_munmap %p %zu\n", addr, sz);
+	// malloc_printf("<jemalloc>: my_munmap %p %zu\n", addr, sz);
 	return munmap(addr, sz);
 }
 static void my_mprotect(void *addr, size_t sz, int prot) {
-	malloc_printf("<jemalloc>: my_mprotect %p %zu %i\n", addr, sz, prot);
+	// malloc_printf("<jemalloc>: my_mprotect %p %zu %i\n", addr, sz, prot);
 	mprotect(addr, sz, prot);
 }
 
 static int my_madvise(int *addr, size_t sz, int advice) {
-	malloc_printf("<jemalloc>: my_madvise %p %zu %i\n", addr, sz, advice);
+	// malloc_printf("<jemalloc>: my_madvise %p %zu %i\n", addr, sz, advice);
 	if (advice == MADV_DONTNEED) {
 		return -EINVAL;
 	}
