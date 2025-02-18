@@ -72,10 +72,9 @@ static int open_mmap_fd(void) {
 
 static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t offset) {
 	// round up to the nearest page size multiple
+	malloc_printf("<jemalloc>: my_mmap %p %zu (%zu KB) %i %i %i %zi -> %lx\n", addr, sz, sz >> 10, prot, flags, fd, offset, my_mmap_sbrk);
 
 	sz = ALIGNMENT_CEILING(sz, LARGE_PAGE_SIZE);
-
-	malloc_printf("<jemalloc>: my_mmap %p %zu %i %i %i %zi\n", addr, sz, prot, flags, fd, offset);
 
 	if (my_mmap_sbrk + sz > MY_MMAP_ADDRESS_RANGE_END) {
 		malloc_write("<jemalloc>: Cannot allocate more memory\n");
@@ -173,15 +172,34 @@ static void my_mprotect(void *addr, size_t sz, int prot) {
 	}
 }
 
+static int my_madvise(int *addr, size_t sz, int advice) {
+	malloc_printf("<jemalloc>: my_madvise %p %zu %i\n", addr, sz, advice);
+	if (advice == MADV_DONTNEED) {
+		return -EINVAL;
+	}
+	return -EINVAL;
+}
 #else
 static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t offset) {
+	malloc_printf("<jemalloc>: my_mmap %p %zu %i %i %i %zi\n", addr, sz, prot, flags, fd, offset);
 	return mmap(addr, sz, prot, flags, fd, offset);
 }
 static int my_munmap(void *addr, size_t sz) {
+	malloc_printf("<jemalloc>: my_munmap %p %zu\n", addr, sz);
 	return munmap(addr, sz);
 }
 static void my_mprotect(void *addr, size_t sz, int prot) {
-	return mprotect(addr, sz, prot);
+	malloc_printf("<jemalloc>: my_mprotect %p %zu %i\n", addr, sz, prot);
+	mprotect(addr, sz, prot);
+}
+
+static int my_madvise(int *addr, size_t sz, int advice) {
+	malloc_printf("<jemalloc>: my_madvise %p %zu %i\n", addr, sz, advice);
+	if (advice == MADV_DONTNEED) {
+		return -EINVAL;
+	}
+	return -EINVAL;
+	// return madvise(addr, sz, flags);
 }
 #endif
 
@@ -242,7 +260,7 @@ static int madvise_MADV_DONTNEED_zeroes_pages()
 	}
 
 	memset(addr, 'A', size);
-	if (madvise(addr, size, MADV_DONTNEED) == 0) {
+	if (my_madvise(addr, size, MADV_DONTNEED) == 0) {
 		works = memchr(addr, 'A', size) == NULL;
 	} else {
 		/*
@@ -609,7 +627,7 @@ pages_purge_lazy(void *addr, size_t size) {
 	VirtualAlloc(addr, size, MEM_RESET, PAGE_READWRITE);
 	return false;
 #elif defined(JEMALLOC_PURGE_MADVISE_FREE)
-	return (madvise(addr, size,
+	return (my_madvise(addr, size,
 #  ifdef MADV_FREE
 	    MADV_FREE
 #  else
@@ -618,10 +636,10 @@ pages_purge_lazy(void *addr, size_t size) {
 	    ) != 0);
 #elif defined(JEMALLOC_PURGE_MADVISE_DONTNEED) && \
     !defined(JEMALLOC_PURGE_MADVISE_DONTNEED_ZEROS)
-	return (madvise(addr, size, MADV_DONTNEED) != 0);
+	return (my_madvise(addr, size, MADV_DONTNEED) != 0);
 #elif defined(JEMALLOC_PURGE_POSIX_MADVISE_DONTNEED) && \
     !defined(JEMALLOC_PURGE_POSIX_MADVISE_DONTNEED_ZEROS)
-	return (posix_madvise(addr, size, POSIX_MADV_DONTNEED) != 0);
+	return (my_madvise(addr, size, POSIX_MADV_DONTNEED) != 0);
 #else
 	not_reached();
 #endif
@@ -639,11 +657,11 @@ pages_purge_forced(void *addr, size_t size) {
 #if defined(JEMALLOC_PURGE_MADVISE_DONTNEED) && \
     defined(JEMALLOC_PURGE_MADVISE_DONTNEED_ZEROS)
 	return (unlikely(madvise_dont_need_zeros_is_faulty) ||
-	    madvise(addr, size, MADV_DONTNEED) != 0);
+		my_madvise(addr, size, MADV_DONTNEED) != 0);
 #elif defined(JEMALLOC_PURGE_POSIX_MADVISE_DONTNEED) && \
     defined(JEMALLOC_PURGE_POSIX_MADVISE_DONTNEED_ZEROS)
 	return (unlikely(madvise_dont_need_zeros_is_faulty) ||
-	    posix_madvise(addr, size, POSIX_MADV_DONTNEED) != 0);
+		my_madvise(addr, size, POSIX_MADV_DONTNEED) != 0);
 #elif defined(JEMALLOC_MAPS_COALESCE)
 	/* Try to overlay a new demand-zeroed mapping. */
 	return pages_commit(addr, size);
@@ -659,7 +677,7 @@ pages_huge_impl(void *addr, size_t size, bool aligned) {
 		assert(HUGEPAGE_CEILING(size) == size);
 	}
 #if defined(JEMALLOC_HAVE_MADVISE_HUGE)
-	return (madvise(addr, size, MADV_HUGEPAGE) != 0);
+	return (my_madvise(addr, size, MADV_HUGEPAGE) != 0);
 #elif defined(JEMALLOC_HAVE_MEMCNTL)
 	struct memcntl_mha m = {0};
 	m.mha_cmd = MHA_MAPSIZE_VA;
@@ -688,7 +706,7 @@ pages_nohuge_impl(void *addr, size_t size, bool aligned) {
 	}
 
 #ifdef JEMALLOC_HAVE_MADVISE_HUGE
-	return (madvise(addr, size, MADV_NOHUGEPAGE) != 0);
+	return (my_madvise(addr, size, MADV_NOHUGEPAGE) != 0);
 #else
 	return false;
 #endif
@@ -709,9 +727,9 @@ pages_dontdump(void *addr, size_t size) {
 	assert(PAGE_ADDR2BASE(addr) == addr);
 	assert(PAGE_CEILING(size) == size);
 #if defined(JEMALLOC_MADVISE_DONTDUMP)
-	return madvise(addr, size, MADV_DONTDUMP) != 0;
+	return my_madvise(addr, size, MADV_DONTDUMP) != 0;
 #elif defined(JEMALLOC_MADVISE_NOCORE)
-	return madvise(addr, size, MADV_NOCORE) != 0;
+	return my_madvise(addr, size, MADV_NOCORE) != 0;
 #else
 	return false;
 #endif
@@ -722,9 +740,9 @@ pages_dodump(void *addr, size_t size) {
 	assert(PAGE_ADDR2BASE(addr) == addr);
 	assert(PAGE_CEILING(size) == size);
 #if defined(JEMALLOC_MADVISE_DONTDUMP)
-	return madvise(addr, size, MADV_DODUMP) != 0;
+	return my_madvise(addr, size, MADV_DODUMP) != 0;
 #elif defined(JEMALLOC_MADVISE_NOCORE)
-	return madvise(addr, size, MADV_CORE) != 0;
+	return my_madvise(addr, size, MADV_CORE) != 0;
 #else
 	return false;
 #endif
