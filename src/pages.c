@@ -42,6 +42,9 @@ static pthread_mutex_t my_mmap_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define MY_MMAP_ADDRESS_RANGE_END VA_RANGE_MAX
 #define MY_MMAP_REGION_SIZE (MY_MMAP_ADDRESS_RANGE_END - MY_MMAP_ADDRESS_RANGE_START + 1)
 
+#define BASE_PAGE_SIZE (1ULL << 12)
+#define LARGE_PAGE_SIZE (1ULL << 21)
+
 static uint64_t my_mmap_sbrk = MY_MMAP_ADDRESS_RANGE_START;
 
 static int open_mmap_fd(void) {
@@ -68,6 +71,12 @@ static int open_mmap_fd(void) {
 }
 
 static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t offset) {
+	// round up to the nearest page size multiple
+
+	sz = ALIGNMENT_CEILING(sz, LARGE_PAGE_SIZE);
+
+	malloc_printf("<jemalloc>: my_mmap %p %zu %i %i %i %zi\n", addr, sz, prot, flags, fd, offset);
+
 	if (my_mmap_sbrk + sz > MY_MMAP_ADDRESS_RANGE_END) {
 		malloc_write("<jemalloc>: Cannot allocate more memory\n");
 		return MAP_FAILED;
@@ -78,56 +87,80 @@ static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t o
 		return MAP_FAILED;
 	}
 
-	if (sz != PAGE || sz != HUGEPAGE) {
-		malloc_write("<jemalloc>: Requested size not a single page!\n");
-		return MAP_FAILED;
-	}
-
 	pthread_mutex_lock(&my_mmap_mutex);
 	if (my_mmap_fd == -1 && open_mmap_fd() != 0) {
 		pthread_mutex_unlock(&my_mmap_mutex);
 		return MAP_FAILED;
 	}
 
-	// align, so we can do a proper huge page mapping, waists some memory
-	if (sz == HUGEPAGE) {
-		my_mmap_sbrk = ALIGNMENT_CEILING(my_mmap_sbrk, HUGEPAGE);
+	// if we're allocating a huge page, then align the address to a huge page boundary
+	if (sz >= LARGE_PAGE_SIZE) {
+		my_mmap_sbrk = ALIGNMENT_CEILING(my_mmap_sbrk, LARGE_PAGE_SIZE);
 	}
 
 	void *ret = (void *)my_mmap_sbrk;
 
-	union verified_mmap_ioctl_args args;
-	args.mmap_args = (struct mmap_args){
-		.vaddr = (uint64_t)ret,
-		.sz = sz,
-		.flags = flags
-	};
+	size_t mapped = 0;
+	while(mapped < sz) {
+		size_t map_size = BASE_PAGE_SIZE;
+		if ((sz - mapped) >= LARGE_PAGE_SIZE) {
+			map_size = LARGE_PAGE_SIZE;
+		}
 
-	if (ioctl(my_mmap_fd, CMD_MMAP, &args) < 0) {
-		perror("ioctl");
-		ret = MAP_FAILED;
-	} else {
-		my_mmap_sbrk += sz;
+		union verified_mmap_ioctl_args args;
+		args.mmap_args = (struct mmap_args){
+			.vaddr = (uint64_t)ret + mapped,
+			.sz = map_size,
+			.flags = flags
+		};
+
+		if (ioctl(my_mmap_fd, CMD_MMAP, &args) < 0) {
+			perror("ioctl");
+			ret = MAP_FAILED;
+			break;
+		} else {
+			my_mmap_sbrk += map_size;
+			mapped += map_size;
+		}
 	}
+
 	pthread_mutex_unlock(&my_mmap_mutex);
+	malloc_printf("<jemalloc>: my_mmap  %p\n", ret);
 	return ret;
 }
 
 static int my_munmap(void *addr, size_t sz) {
-	union verified_mmap_ioctl_args args;
-	args.munmap_args = (struct munmap_args){
-		.vaddr = (uint64_t)addr,
-		.sz = sz
-	};
 
-	if (ioctl(my_mmap_fd, CMD_MUNMAP, &args) < 0) {
-		perror("ioctl");
-		return -1;
+	malloc_printf("<jemalloc>: my_munmap %p %zu\n", addr, sz);
+
+	sz = ALIGNMENT_CEILING(sz, LARGE_PAGE_SIZE);
+
+	size_t unmapped = 0;
+	while(unmapped < sz) {
+		size_t unmap_size = BASE_PAGE_SIZE;
+		if ((sz - unmapped) >= LARGE_PAGE_SIZE) {
+			unmap_size = LARGE_PAGE_SIZE;
+		}
+
+		union verified_mmap_ioctl_args args;
+		args.munmap_args = (struct munmap_args){
+			.vaddr = (uint64_t)addr + unmapped,
+			.sz = unmap_size
+		};
+		if (ioctl(my_mmap_fd, CMD_MUNMAP, &args) < 0) {
+			perror("ioctl");
+			return -1;
+		} else {
+			unmapped += unmap_size;
+		}
 	}
+
 	return 0;
 }
 
 static void my_mprotect(void *addr, size_t sz, int prot) {
+	malloc_printf("<jemalloc>: my_mprotect %p %zu %i\n", addr, sz, prot);
+
 	union verified_mmap_ioctl_args args;
 	args.mprotect_args = (struct mprotect_args){
 		.vaddr = (uint64_t)addr,
