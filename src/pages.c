@@ -61,11 +61,13 @@ static int open_mmap_fd(void) {
 	// MAP_NORESERVE to ensure that the default overcommit mechanism won't check your allocation.
 
 	// PROT_NONE is commonly employed for "guard" pages at the end of stacks.
-	void *addr = mmap((void *)MY_MMAP_ADDRESS_RANGE_START, MY_MMAP_REGION_SIZE, PROT_NONE, MAP_NORESERVE|MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	void *addr = mmap((void *)MY_MMAP_ADDRESS_RANGE_START, MY_MMAP_REGION_SIZE, PROT_NONE, MAP_SHARED, my_mmap_fd, 0);
 	if (addr == MAP_FAILED) {
 		perror("mmap");
 		return 1;
 	}
+
+	malloc_write("<jemalloc>: initialized the mmap interface\n");
 
 	return 0;
 }
