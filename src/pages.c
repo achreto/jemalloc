@@ -25,9 +25,8 @@
 
 /* <extension> ************************************************************************************
  **************************************************************************************************/
-#define USE_MY_MMAP 1
 
-#ifdef USE_MY_MMAP
+#ifdef CONFIG_USE_MMAP_MODULE
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include "../../include/verified_mmap_ioctl.h"
