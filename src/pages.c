@@ -111,7 +111,8 @@ static void *my_mmap(void *addr, size_t sz, int prot, int flags, int fd, off_t o
 		args.mmap_args = (struct mmap_args){
 			.vaddr = (uint64_t)ret + mapped,
 			.sz = map_size,
-			.flags = flags
+			.flags = flags,
+			.fd = fd
 		};
 
 		if (ioctl(my_mmap_fd, CMD_MMAP, &args) < 0) {
